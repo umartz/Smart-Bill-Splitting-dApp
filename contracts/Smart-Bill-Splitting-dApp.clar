@@ -9,9 +9,13 @@
 (define-constant err-not-member (err u107))
 (define-constant err-bill-settled (err u108))
 (define-constant err-already-exists (err u109))
+(define-constant err-invalid-interval (err u110))
+(define-constant err-recurring-not-found (err u111))
+(define-constant err-recurring-inactive (err u112))
 
 (define-data-var group-nonce uint u0)
 (define-data-var bill-nonce uint u0)
+(define-data-var recurring-bill-nonce uint u0)
 
 (define-map groups
   uint
@@ -59,6 +63,20 @@
 (define-map user-balances
   {group-id: uint, user: principal}
   uint
+)
+
+(define-map recurring-bills
+  uint
+  {
+    group-id: uint,
+    description: (string-ascii 100),
+    amount: uint,
+    interval-blocks: uint,
+    next-due-block: uint,
+    creator: principal,
+    created-at: uint,
+    active: bool
+  }
 )
 
 (define-public (create-group (name (string-ascii 50)))
@@ -213,4 +231,83 @@
 
 (define-read-only (get-bill-nonce)
   (ok (var-get bill-nonce))
+)
+
+(define-public (create-recurring-bill (group-id uint) (description (string-ascii 100)) (amount uint) (interval-blocks uint))
+  (let
+    (
+      (recurring-id (+ (var-get recurring-bill-nonce) u1))
+      (group (unwrap! (map-get? groups group-id) err-not-found))
+      (membership (unwrap! (map-get? group-members {group-id: group-id, member: tx-sender}) err-not-member))
+      (current-block stacks-block-height)
+      (next-due (+ current-block interval-blocks))
+    )
+    (asserts! (get is-active membership) err-not-member)
+    (asserts! (> amount u0) err-insufficient-amount)
+    (asserts! (> interval-blocks u0) err-invalid-interval)
+    (map-set recurring-bills recurring-id {
+      group-id: group-id,
+      description: description,
+      amount: amount,
+      interval-blocks: interval-blocks,
+      next-due-block: next-due,
+      creator: tx-sender,
+      created-at: current-block,
+      active: true
+    })
+    (var-set recurring-bill-nonce recurring-id)
+    (ok recurring-id)
+  )
+)
+
+(define-public (process-recurring-bill (recurring-id uint))
+  (let
+    (
+      (recurring (unwrap! (map-get? recurring-bills recurring-id) err-recurring-not-found))
+      (group-id (get group-id recurring))
+      (membership (unwrap! (map-get? group-members {group-id: group-id, member: tx-sender}) err-not-member))
+      (current-block stacks-block-height)
+      (bill-id (+ (var-get bill-nonce) u1))
+      (group (unwrap! (map-get? groups group-id) err-not-found))
+      (member-count (get member-count group))
+      (amount-per-person (/ (get amount recurring) member-count))
+      (new-next-due (+ current-block (get interval-blocks recurring)))
+    )
+    (asserts! (get active recurring) err-recurring-inactive)
+    (asserts! (get is-active membership) err-not-member)
+    (asserts! (>= current-block (get next-due-block recurring)) err-unauthorized)
+    (map-set bills bill-id {
+      group-id: group-id,
+      description: (get description recurring),
+      total-amount: (get amount recurring),
+      paid-by: tx-sender,
+      split-count: member-count,
+      amount-per-person: amount-per-person,
+      created-at: current-block,
+      settled: false
+    })
+    (map-set recurring-bills recurring-id (merge recurring {next-due-block: new-next-due}))
+    (var-set bill-nonce bill-id)
+    (ok bill-id)
+  )
+)
+
+(define-public (cancel-recurring-bill (recurring-id uint))
+  (let
+    (
+      (recurring (unwrap! (map-get? recurring-bills recurring-id) err-recurring-not-found))
+    )
+    (asserts! (is-eq tx-sender (get creator recurring)) err-unauthorized)
+    (asserts! (get active recurring) err-recurring-inactive)
+    (map-set recurring-bills recurring-id (merge recurring {active: false}))
+    (ok true)
+  )
+)
+
+(define-read-only (get-recurring-bill (recurring-id uint))
+  (ok (map-get? recurring-bills recurring-id))
+)
+
+(define-read-only (get-recurring-bill-nonce)
+  (ok (var-get recurring-bill-nonce))
 )
